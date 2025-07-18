@@ -14,10 +14,9 @@ from lark_oapi.api.im.v1 import (
     CreateImageRequestBody,
     CreateImageResponse,
 )
-from pyecharts.render import make_snapshot
-from snapshot_selenium import snapshot
+from playwright.sync_api import sync_playwright
 
-from chanlun import config, kcharts
+from chanlun import config, fun, kcharts
 from chanlun.backtesting.base import Strategy
 from chanlun.cl_interface import ICL
 from chanlun.cl_utils import bi_td, web_batch_get_cl_datas
@@ -112,6 +111,8 @@ def monitoring_code(
                     "bi_td": bi_td(end_bi, cd),
                     "fx_ld": end_bi.end.ld(),
                     "line_dt": end_bi.start.k.date,
+                    "k_date": cd.get_src_klines()[-1].date,
+                    "line_type": end_bi.type,
                 }
                 for bc_type in check_cl_types["bi_beichi"]
                 if end_bi.bc_exists([bc_type], "|")
@@ -125,6 +126,8 @@ def monitoring_code(
                     "bi_td": bi_td(end_bi, cd),
                     "fx_ld": end_bi.end.ld(),
                     "line_dt": end_bi.start.k.date,
+                    "k_date": cd.get_src_klines()[-1].date,
+                    "line_type": end_bi.type,
                 }
                 for mmd in check_cl_types["bi_mmd"]
                 if end_bi.mmd_exists([mmd], "|")
@@ -139,6 +142,8 @@ def monitoring_code(
                         "frequency": frequency,
                         "xd": end_xd,
                         "line_dt": end_xd.start.k.date,
+                        "k_date": cd.get_src_klines()[-1].date,
+                        "line_type": end_xd.type,
                     }
                     for bc_type in check_cl_types["xd_beichi"]
                     if end_xd.bc_exists([bc_type], "|")
@@ -150,6 +155,8 @@ def monitoring_code(
                         "frequency": frequency,
                         "xd": end_xd,
                         "line_dt": end_xd.start.k.date,
+                        "k_date": cd.get_src_klines()[-1].date,
+                        "line_type": end_xd.type,
                     }
                     for mmd in check_cl_types["xd_mmd"]
                     if end_xd.mmd_exists([mmd], "|")
@@ -174,6 +181,7 @@ def monitoring_code(
                         "frequency": frequency,
                         "cross": "up",
                         "k_date": cd.get_src_klines()[-1].date,
+                        "line_type": "down",
                     }
                 )
             if (
@@ -188,6 +196,7 @@ def monitoring_code(
                         "frequency": frequency,
                         "cross": "down",
                         "k_date": cd.get_src_klines()[-1].date,
+                        "line_type": "up",
                     }
                 )
         if check_idx_types["idx_macd"]["enable"]:
@@ -205,6 +214,7 @@ def monitoring_code(
                         "frequency": frequency,
                         "cross": "up",
                         "k_date": cd.get_src_klines()[-1].date,
+                        "line_type": "down",
                     }
                 )
             if (
@@ -219,6 +229,7 @@ def monitoring_code(
                         "frequency": frequency,
                         "cross": "down",
                         "k_date": cd.get_src_klines()[-1].date,
+                        "line_type": "up",
                     }
                 )
 
@@ -246,6 +257,7 @@ def monitoring_code(
             fx_ld = f" FX:{jh['fx_ld']}" if "fx_ld" in jh.keys() else ""  # 分型力度
             msg = f"触发 {jh['type']} ({is_done} - {is_td}{fx_ld})"
             send_msgs.append(f"【{name} - {jh['frequency']}】{msg}")
+            # 添加数据库记录
             db.alert_record_save(
                 market,
                 task_name,
@@ -257,6 +269,18 @@ def monitoring_code(
                 is_td,
                 line_type,
                 jh["line_dt"],
+            )
+            # 添加图表标记
+            db.marks_add_by_price(
+                market,
+                code,
+                name,
+                jh["frequency"],
+                fun.datetime_to_int(jh["k_date"]),
+                "A",
+                msg,
+                "green" if jh["line_type"] == "down" else "red",
+                "red" if jh["line_type"] == "down" else "green",
             )
     # 记录指标提醒信息
     for jh in jh_idx_msgs:
@@ -319,21 +343,36 @@ def kchart_to_png(market: str, title: str, cd: ICL, cl_config: dict) -> str:
     png_path = config.get_data_path() / "png"
     if png_path.is_dir() is False:
         png_path.mkdir(parents=True)
-    cl_config["chart_width"] = "1000px"
-    cl_config["chart_heigh"] = "800px"
+    cl_config["chart_width"] = "100%"
+    cl_config["chart_high"] = "400px"
+    cl_config["chart_show_ma"] = False
+    cl_config["chart_show_ama"] = False
+    cl_config["chart_show_boll"] = False
+    cl_config["chart_show_infos"] = False
     cl_config["chart_kline_nums"] = 600
     file_name = (
         cd.get_code().replace(".", "_").replace("/", "_").replace("@", "_")
         + "_"
         + cd.get_frequency()
     )
-    cl_config["to_file"] = f"{file_name}_{int(time.time())}.html"
+    cl_config["to_file"] = f"{str(png_path)}/{file_name}_{int(time.time())}.html"
     png_file = f"{str(png_path)}/{file_name}_{int(time.time())}.png"
 
     try:
         # 渲染并保存图片
         render_file = kcharts.render_charts(title, cd, config=cl_config)
-        make_snapshot(snapshot, render_file, png_file, is_remove_html=True, delay=4)
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            # 设置页面的视口大小
+            page.set_viewport_size({"width": 800, "height": 400})
+            page.goto(f"file://{render_file}")
+            # 等待页面加载完成
+            page.wait_for_load_state("domcontentloaded")
+            # 截图
+            page.screenshot(path=png_file, type="png", full_page=True)
+            browser.close()
 
         # 上传图片
         # 创建client
