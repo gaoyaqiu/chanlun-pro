@@ -613,6 +613,42 @@ def xg_single_bi_1buy_next_l3buy_mmd(
     return None
 
 
+def xg_single_find_qs_by_zhuanzhe_zs(
+    code: str, mk_datas: MarketDatas, opt_type: list = []
+):
+    """
+    找趋势转折后的第一个中枢
+    周期：单周期
+    使用市场：沪深A股
+    作者：WX
+    """
+    opt_direction, opt_mmd = get_opt_types(opt_type)
+    cd = mk_datas.get_cl_data(code, mk_datas.frequencys[0])
+    if len(cd.get_bis()) <= 5 or len(cd.get_xds()) < 2 or len(cd.get_bi_zss()) < 3:
+        return None
+    zss = cd.get_bi_zss()
+    # 比较最后两个中枢的位置关系
+    zs_qs = cd.zss_is_qs(zss[-3], zss[-2])
+    if zs_qs not in opt_direction:
+        return None
+
+    if zss[-2].lines[0].index - zss[-3].lines[-1].index >= 3:
+        return None
+    # 最新的中枢
+    zs = zss[-1]
+    # 最新的中枢其实笔，要与中枢趋势不同
+    if zs.lines[0].type == zs_qs:
+        return None
+    # 当前中枢进行时
+    bi = cd.get_bis()[-1]
+    if zs.lines[-1].index != bi.index:
+        return None
+    # 两个中枢不能离得太远
+    if zs.lines[0].index - zss[-2].lines[-1].index >= 5:
+        return None
+    return {"code": cd.get_code(), "msg": "出现趋势转折的第一个中枢了"}
+
+
 def xg_single_xdzs_bimmdbc(code: str, mk_datas: MarketDatas, opt_type: list = []):
     deviation_rate = 0.08
     cd = mk_datas.get_cl_data(code, mk_datas.frequencys[0])
@@ -746,18 +782,76 @@ def xg_single_xd_next_zz(
     }
 
 
+def xg_single_xd_zs_nei_3mmds(
+    code: str, mk_datas: MarketDatas, opt_type: list = []
+) -> Union[None, dict]:
+    """
+    单周期，查找线段中枢内的三类买卖点
+    要求：
+    1. 必须有线段中枢，并且线段中枢包括进入段数量要大于等于7
+    2. 最新的线段要在线段中枢内部，自线段其实的位置，只有一个三类买卖点
+    """
+    opt_direction, opt_mmd = get_opt_types(opt_type)
+    cd = mk_datas.get_cl_data(code, mk_datas.frequencys[0])
+    if len(cd.get_xd_zss()) == 0:
+        return None
+    xd = cd.get_xds()[-1]
+    xd_zs = cd.get_xd_zss()[-1]
+    bi = cd.get_bis()[-1]
+    if len(xd_zs.lines) < 7:
+        return None
+    if xd.index not in [_l.index for _l in xd_zs.lines]:
+        return None
+
+    if bi.type not in opt_direction:
+        return None
+
+    check_mmds = []
+    if "down" in opt_direction:
+        check_mmds.extend(["3buy", "l3buy"])
+    if "up" in opt_direction:
+        check_mmds.extend(["3sell", "l3sell"])
+
+    if bi.mmd_exists(check_mmds, "|") is False:
+        return None
+
+    # 中枢要是一个标准的中枢，进入端的起点要是中枢的最高或最低
+    xd_zs_high = max([_l.high for _l in xd_zs.lines])
+    xd_zs_low = min([_l.low for _l in xd_zs.lines])
+    if xd_zs.lines[0].type == "down" and xd_zs_high != xd_zs.lines[0].high:
+        return None
+    if xd_zs.lines[0].type == "up" and xd_zs_low != xd_zs.lines[0].low:
+        return None
+
+    # 计数，记录自线段开始后的笔出现的买卖点次数
+    mmd_count = 0
+    for _bi in cd.get_bis():
+        if _bi.index < xd.start_line.index:
+            continue
+        if _bi.type == bi.type and _bi.mmd_exists(["3buy", "3sell"], "|"):
+            mmd_count += 1
+
+    if mmd_count >= 2:  # 只提醒第一次的买卖点
+        return None
+
+    return {
+        "code": code,
+        "msg": f"线段中枢盘整后出现笔的三类买卖点",
+    }
+
+
 if __name__ == "__main__":
     from chanlun.cl_utils import query_cl_chart_config
     from chanlun.exchange.exchange_tdx import ExchangeTDX
     from chanlun.trader.online_market_datas import OnlineMarketDatas
 
     market = "a"
-    code = "SZ.000551"
+    code = "SZ.000017"
     freqs = ["d"]
 
     ex = ExchangeTDX()
     cl_config = query_cl_chart_config(market, code)
     mkd = OnlineMarketDatas(market, freqs, ex, cl_config)
 
-    res = xg_single_bi_1buy_next_l3buy_mmd(code, mkd)
+    res = xg_single_xd_zs_nei_3mmds(code, mkd, opt_type=["long", "short"])
     print(res)
